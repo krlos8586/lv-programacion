@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LV TowerNex · actualizador
 // @namespace    lps-lv-towernex
-// @version      1.0.0
+// @version      1.1.0
 // @description  Actualiza la página de líneas de vida LPS/TowerNex con Sitetracker y el SharePoint de TowerNex usando tu propia sesión. SOLO LECTURA: no crea, edita ni borra nada en TowerNex.
 // @author       LPS Grupo
 // @match        https://krlos8586.github.io/lv-programacion/*
@@ -21,7 +21,7 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='1.0.0';
+const VERSION='1.1.0';
 const SP='https://towernexcolombiasas.sharepoint.com/sites/TowerNex-ContratistasOM';
 const ST_URL='https://towernex.my.site.com/scp/s/';
 
@@ -51,8 +51,15 @@ if(location.hostname==='krlos8586.github.io'){
       const m=p.match(/CO-[A-Z]{3}\d{4}/); if(!m) continue; const f=p.slice(p.lastIndexOf('/')+1);
       const k=/carta de responsabilidad/i.test(f)?'K':/PROTOCOLO/i.test(f)?'P':/RECERTIFICACION/i.test(f)?'R':/CERTIFICADO DE INSTALACI/i.test(f)?'I':/GARANTIA/i.test(f)?'G':/SUMINISTRO|Certificado LV|Certificado_ LV|Certificado producto/i.test(f)?'F':null;
       if(!k) continue; (out[m[0]]=out[m[0]]||[]).push([k,p,String(x.LastModifiedTime||'').slice(0,10)]); }
+    // la búsqueda de SharePoint tarda en olvidar archivos borrados o movidos: se confirma uno por uno que exista
+    const REL='/sites/TowerNex-ContratistasOM/LPS/'; const list=[]; Object.entries(out).forEach(([s,v])=>v.forEach(d=>list.push([s,d])));
+    const exists=d=>new Promise(res=>GM_xmlhttpRequest({method:'GET',url:SP+"/_api/web/GetFileByServerRelativePath(decodedurl='"+encodeURIComponent((REL+d[1]).replace(/'/g,"''"))+"')?$select=Exists",
+      headers:{Accept:'application/json;odata=nometadata'},timeout:30000,onload:r=>res(r.status===404?false:true),onerror:()=>res(true),ontimeout:()=>res(true)}));
+    let k=0, gone=0; const work=async()=>{ while(k<list.length){ const [s,d]=list[k++]; if(!(await exists(d))){ d.gone=1; gone++; } } };
+    await Promise.all(Array.from({length:6},work));
+    Object.keys(out).forEach(s=>{ out[s]=out[s].filter(d=>!d.gone); if(!out[s].length) delete out[s]; });
     Object.values(out).forEach(v=>v.sort((a,b)=>a[2]<b[2]?1:a[2]>b[2]?-1:(a[1]<b[1]?-1:1)));
-    return {total:all.length, docs:out};
+    return {total:all.length, verificados:list.length, eliminados:gone, docs:out};
   }
   // Sitetracker: abre una pestaña en segundo plano con tu sesión, lee y se cierra
   function stRun(){ return new Promise((res,rej)=>{
@@ -68,6 +75,13 @@ if(location.hostname==='krlos8586.github.io'){
 
 /* ---------- 2. En Sitetracker: solo actúa si el tablero lo pidió hace menos de 2 minutos ---------- */
 if(location.hostname==='towernex.my.site.com'){
+  const qp=new URLSearchParams(location.search); const rec=qp.get('lvrec'); const go=qp.get('lvgo');
+  if(rec && /^[a-zA-Z0-9]{15,18}$/.test(rec)){   // abrir la ficha del registro dentro del portal (la URL directa da «Invalid Page»)
+    const code=`(async()=>{let t=0;while(!(window.$A&&$A.get)&&t<60){await new Promise(r=>setTimeout(r,500));t++} await new Promise(r=>setTimeout(r,1500));
+      try{const ev=$A.get('e.force:navigateToSObject');ev.setParams({recordId:${JSON.stringify(rec)}});ev.fire();}catch(e){}})();`;
+    const s=document.createElement('script'); s.src=URL.createObjectURL(new Blob([code],{type:'text/javascript'})); (document.head||document.documentElement).appendChild(s); return;
+  }
+  if(go){ let n=0; const iv=setInterval(()=>{ const a=document.querySelector('a[href*="/s/detail/"]'); if(a){ clearInterval(iv); a.click(); } else if(++n>40) clearInterval(iv); },500); return; }
   const req=GM_getValue('lv_req'); if(!req||Date.now()-req.ts>120000) return;
   if(!new URLSearchParams(location.search).get('lv')) return;
   const send=o=>GM_setValue('lv_res',Object.assign({id:req.id},o));
@@ -93,8 +107,8 @@ if(location.hostname==='towernex.my.site.com'){
    const day=v=>{if(!v)return '';const s=String(v);return s.includes('T')?new Date(s).toLocaleDateString('en-CA',{timeZone:'America/Bogota'}):s.slice(0,10)};
    const rj=await call({listViewId:'00Bbn0000099k01EAA',pageSize:2000,optionalFields:jf.map(x=>J+x)});
    const rs=await call({listViewId:'00Bbn0000099Vc5EAE',pageSize:2000,optionalFields:sf.map(x=>Sv+x)});
-   const jobs=rj.records.map(rc=>({j:disp(rc,'Name'),site:disp(rc,P+'Site__r.Name'),type:raw(rc,P+'Job_Type__c')||'',est:disp(rc,P+'Job_Status__c')||'',ini:day(raw(rc,P+'Actual_Start__c')),fin:day(raw(rc,P+'Actual_End__c')),carga:day(raw(rc,'Report_Date__c')),com:disp(rc,P+'Customer_Comments__c')||''}));
-   const sitios=rs.records.map(rc=>({id:disp(rc,'Name'),lv:disp(rc,'Lifeline__c')||'',ven:disp(rc,'LifelineVendor__c')||'',inst:day(raw(rc,'Lifeline_Manufacture_Date__c')),next:day(raw(rc,'Lifeline_Certification_Date__c'))}));
+   const jobs=rj.records.map(rc=>({jid:rc.id,j:disp(rc,'Name'),site:disp(rc,P+'Site__r.Name'),type:raw(rc,P+'Job_Type__c')||'',est:disp(rc,P+'Job_Status__c')||'',ini:day(raw(rc,P+'Actual_Start__c')),fin:day(raw(rc,P+'Actual_End__c')),carga:day(raw(rc,'Report_Date__c')),com:disp(rc,P+'Customer_Comments__c')||''}));
+   const sitios=rs.records.map(rc=>({sfid:rc.id,id:disp(rc,'Name'),lv:disp(rc,'Lifeline__c')||'',ven:disp(rc,'LifelineVendor__c')||'',inst:day(raw(rc,'Lifeline_Manufacture_Date__c')),next:day(raw(rc,'Lifeline_Certification_Date__c'))}));
    post({data:{generado:new Date().toISOString(),jobs,sitios}});
   }catch(e){post({error:String(e&&e.message||e)})}})();`;
   const s=document.createElement('script'); s.src=URL.createObjectURL(new Blob([code],{type:'text/javascript'})); (document.head||document.documentElement).appendChild(s);
